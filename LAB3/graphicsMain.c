@@ -1,4 +1,5 @@
 #include <gtk/gtk.h>
+#include <cairo-pdf.h>
 #include <math.h>
 
 typedef struct {
@@ -8,7 +9,7 @@ typedef struct {
     double size;
     double *points;
     int num_points;
-    double color[3]; // RGB color for shape
+    double color[3];
 } Shape;
 
 typedef struct {
@@ -19,7 +20,7 @@ typedef struct {
     gboolean draw_rectangle;
     gboolean draw_polygon;
     gboolean eraser_mode;
-    double current_color[3]; // Current color chosen from color picker
+    double current_color[3];
 } AppData;
 
 static GtkWidget *drawing_area;
@@ -34,6 +35,7 @@ static void on_color_set(GtkColorButton *button, gpointer user_data);
 static void on_next_page_button_clicked(GtkWidget *button, gpointer user_data);
 static void on_prev_page_button_clicked(GtkWidget *button, gpointer user_data);
 static void on_add_page_button_clicked(GtkWidget *button, gpointer user_data);
+static void on_save_pdf_button_clicked(GtkWidget *button, gpointer user_data);
 static void free_object_list(GList *list);
 
 static gboolean on_draw_event(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
@@ -128,6 +130,37 @@ static void button_press_event(GtkWidget *widget, GdkEventButton *event, gpointe
         return;
     }
 
+    if (app->draw_polygon) {
+        GList *page = app->pages[app->current_page];
+        Shape *shape = NULL;
+
+        if (page && ((Shape *)g_list_last(page)->data)->is_polygon) {
+            shape = (Shape *)g_list_last(page)->data;
+        } else {
+            shape = g_malloc(sizeof(Shape));
+            shape->is_circle = FALSE;
+            shape->is_polygon = TRUE;
+            shape->points = g_malloc(2 * sizeof(double));
+            shape->num_points = 0;
+            shape->color[0] = app->current_color[0];
+            shape->color[1] = app->current_color[1];
+            shape->color[2] = app->current_color[2];
+            app->pages[app->current_page] = g_list_append(app->pages[app->current_page], shape);
+        }
+
+        shape->points = g_realloc(shape->points, (shape->num_points + 1) * 2 * sizeof(double));
+        shape->points[shape->num_points * 2] = event->x;
+        shape->points[shape->num_points * 2 + 1] = event->y;
+        shape->num_points++;
+
+        if (event->type == GDK_2BUTTON_PRESS) {
+            shape->is_polygon = FALSE;
+        }
+
+        gtk_widget_queue_draw(drawing_area);
+        return;
+    }
+
     Shape *shape = g_malloc(sizeof(Shape));
     shape->color[0] = app->current_color[0];
     shape->color[1] = app->current_color[1];
@@ -149,15 +182,6 @@ static void button_press_event(GtkWidget *widget, GdkEventButton *event, gpointe
         shape->size = 50;
         shape->points = NULL;
         shape->num_points = 0;
-    } else if (app->draw_polygon) {
-        shape->is_circle = FALSE;
-        shape->is_polygon = TRUE;
-        shape->x = event->x;
-        shape->y = event->y;
-        shape->points = g_malloc(2 * sizeof(double));
-        shape->points[0] = event->x;
-        shape->points[1] = event->y;
-        shape->num_points = 1;
     }
 
     app->pages[app->current_page] = g_list_append(app->pages[app->current_page], shape);
@@ -190,10 +214,10 @@ static void on_polygon_button_clicked(GtkWidget *button, gpointer user_data) {
 
 static void on_eraser_button_clicked(GtkWidget *button, gpointer user_data) {
     AppData *app = (AppData *)user_data;
+    app->eraser_mode = TRUE;
     app->draw_circle = FALSE;
     app->draw_rectangle = FALSE;
     app->draw_polygon = FALSE;
-    app->eraser_mode = TRUE;
 }
 
 static void on_color_set(GtkColorButton *button, gpointer user_data) {
@@ -223,17 +247,35 @@ static void on_prev_page_button_clicked(GtkWidget *button, gpointer user_data) {
 
 static void on_add_page_button_clicked(GtkWidget *button, gpointer user_data) {
     AppData *app = (AppData *)user_data;
-    app->pages = g_realloc(app->pages, (app->num_pages + 1) * sizeof(GList *));
-    app->pages[app->num_pages] = NULL;
     app->num_pages++;
+    app->pages = g_realloc(app->pages, app->num_pages * sizeof(GList *));
+    app->pages[app->num_pages - 1] = NULL;
     app->current_page = app->num_pages - 1;
     gtk_widget_queue_draw(drawing_area);
+}
+
+static void on_save_pdf_button_clicked(GtkWidget *button, gpointer user_data) {
+    AppData *app = (AppData *)user_data;
+    char filename[100];
+    snprintf(filename, sizeof(filename), "page_%d.pdf", app->current_page + 1);
+
+    cairo_surface_t *surface = cairo_pdf_surface_create(filename, 800, 600);
+    cairo_t *cr = cairo_create(surface);
+
+    on_draw_event(drawing_area, cr, user_data);
+
+    cairo_destroy(cr);
+    cairo_surface_destroy(surface);
+
+    g_print("Saved current page as %s\n", filename);
 }
 
 static void free_object_list(GList *list) {
     for (GList *item = list; item != NULL; item = item->next) {
         Shape *shape = (Shape *)item->data;
-        if (shape->points) g_free(shape->points);
+        if (shape->is_polygon && shape->points != NULL) {
+            g_free(shape->points);
+        }
         g_free(shape);
     }
     g_list_free(list);
@@ -242,75 +284,80 @@ static void free_object_list(GList *list) {
 int main(int argc, char *argv[]) {
     gtk_init(&argc, &argv);
 
-    AppData *app = g_malloc(sizeof(AppData));
-    app->current_page = 0;
-    app->num_pages = 1;
-    app->pages = g_malloc(sizeof(GList *));
-    app->pages[0] = NULL;
-    app->draw_circle = FALSE;
-    app->draw_rectangle = FALSE;
-    app->draw_polygon = FALSE;
-    app->eraser_mode = FALSE;
-    app->current_color[0] = 0;
-    app->current_color[1] = 0;
-    app->current_color[2] = 0;
+    AppData app;
+    app.current_page = 0;
+    app.num_pages = 1;
+    app.pages = g_malloc(sizeof(GList *));
+    app.pages[0] = NULL;
+    app.draw_circle = FALSE;
+    app.draw_rectangle = FALSE;
+    app.draw_polygon = FALSE;
+    app.eraser_mode = FALSE;
+    app.current_color[0] = 0;
+    app.current_color[1] = 0;
+    app.current_color[2] = 0;
 
     GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_window_set_title(GTK_WINDOW(window), "Drawing Application");
+    gtk_window_set_default_size(GTK_WINDOW(window), 800, 600);
     g_signal_connect(window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
+
+    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_container_add(GTK_CONTAINER(window), vbox);
 
     drawing_area = gtk_drawing_area_new();
     gtk_widget_set_size_request(drawing_area, 800, 600);
-    g_signal_connect(G_OBJECT(drawing_area), "draw", G_CALLBACK(on_draw_event), app);
-    g_signal_connect(G_OBJECT(drawing_area), "button-press-event", G_CALLBACK(button_press_event), app);
-    gtk_widget_set_events(drawing_area, gtk_widget_get_events(drawing_area) | GDK_BUTTON_PRESS_MASK);
+    gtk_box_pack_start(GTK_BOX(vbox), drawing_area, TRUE, TRUE, 0);
+    g_signal_connect(drawing_area, "draw", G_CALLBACK(on_draw_event), &app);
+    g_signal_connect(drawing_area, "button-press-event", G_CALLBACK(button_press_event), &app);
+    gtk_widget_add_events(drawing_area, GDK_BUTTON_PRESS_MASK);
 
-    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_pack_start(GTK_BOX(vbox), hbox, FALSE, FALSE, 0);
 
-    GtkWidget *circle_button = gtk_button_new_with_label("Circle");
-    g_signal_connect(circle_button, "clicked", G_CALLBACK(on_circle_button_clicked), app);
-    gtk_box_pack_start(GTK_BOX(hbox), circle_button, TRUE, TRUE, 0);
+    GtkWidget *circle_button = gtk_button_new_with_label("Draw Circle");
+    g_signal_connect(circle_button, "clicked", G_CALLBACK(on_circle_button_clicked), &app);
+    gtk_box_pack_start(GTK_BOX(hbox), circle_button, FALSE, FALSE, 0);
 
-    GtkWidget *rectangle_button = gtk_button_new_with_label("Rectangle");
-    g_signal_connect(rectangle_button, "clicked", G_CALLBACK(on_rectangle_button_clicked), app);
-    gtk_box_pack_start(GTK_BOX(hbox), rectangle_button, TRUE, TRUE, 0);
+    GtkWidget *rectangle_button = gtk_button_new_with_label("Draw Rectangle");
+    g_signal_connect(rectangle_button, "clicked", G_CALLBACK(on_rectangle_button_clicked), &app);
+    gtk_box_pack_start(GTK_BOX(hbox), rectangle_button, FALSE, FALSE, 0);
 
-    GtkWidget *polygon_button = gtk_button_new_with_label("Polygon");
-    g_signal_connect(polygon_button, "clicked", G_CALLBACK(on_polygon_button_clicked), app);
-    gtk_box_pack_start(GTK_BOX(hbox), polygon_button, TRUE, TRUE, 0);
+    GtkWidget *polygon_button = gtk_button_new_with_label("Draw Polygon");
+    g_signal_connect(polygon_button, "clicked", G_CALLBACK(on_polygon_button_clicked), &app);
+    gtk_box_pack_start(GTK_BOX(hbox), polygon_button, FALSE, FALSE, 0);
 
     GtkWidget *eraser_button = gtk_button_new_with_label("Eraser");
-    g_signal_connect(eraser_button, "clicked", G_CALLBACK(on_eraser_button_clicked), app);
-    gtk_box_pack_start(GTK_BOX(hbox), eraser_button, TRUE, TRUE, 0);
+    g_signal_connect(eraser_button, "clicked", G_CALLBACK(on_eraser_button_clicked), &app);
+    gtk_box_pack_start(GTK_BOX(hbox), eraser_button, FALSE, FALSE, 0);
+
+    GtkWidget *color_button = gtk_color_button_new();
+    g_signal_connect(color_button, "color-set", G_CALLBACK(on_color_set), &app);
+    gtk_box_pack_start(GTK_BOX(hbox), color_button, FALSE, FALSE, 0);
 
     GtkWidget *next_page_button = gtk_button_new_with_label("Next Page");
-    g_signal_connect(next_page_button, "clicked", G_CALLBACK(on_next_page_button_clicked), app);
-    gtk_box_pack_start(GTK_BOX(hbox), next_page_button, TRUE, TRUE, 0);
+    g_signal_connect(next_page_button, "clicked", G_CALLBACK(on_next_page_button_clicked), &app);
+    gtk_box_pack_start(GTK_BOX(hbox), next_page_button, FALSE, FALSE, 0);
 
     GtkWidget *prev_page_button = gtk_button_new_with_label("Previous Page");
-    g_signal_connect(prev_page_button, "clicked", G_CALLBACK(on_prev_page_button_clicked), app);
-    gtk_box_pack_start(GTK_BOX(hbox), prev_page_button, TRUE, TRUE, 0);
+    g_signal_connect(prev_page_button, "clicked", G_CALLBACK(on_prev_page_button_clicked), &app);
+    gtk_box_pack_start(GTK_BOX(hbox), prev_page_button, FALSE, FALSE, 0);
 
     GtkWidget *add_page_button = gtk_button_new_with_label("Add Page");
-    g_signal_connect(add_page_button, "clicked", G_CALLBACK(on_add_page_button_clicked), app);
-    gtk_box_pack_start(GTK_BOX(hbox), add_page_button, TRUE, TRUE, 0);
+    g_signal_connect(add_page_button, "clicked", G_CALLBACK(on_add_page_button_clicked), &app);
+    gtk_box_pack_start(GTK_BOX(hbox), add_page_button, FALSE, FALSE, 0);
 
-    GtkWidget *color_picker = gtk_color_button_new();
-    g_signal_connect(color_picker, "color-set", G_CALLBACK(on_color_set), app);
-    gtk_box_pack_start(GTK_BOX(hbox), color_picker, TRUE, TRUE, 0);
-
-    gtk_box_pack_start(GTK_BOX(vbox), drawing_area, TRUE, TRUE, 0);
-    gtk_box_pack_start(GTK_BOX(vbox), hbox, FALSE, FALSE, 0);
-    gtk_container_add(GTK_CONTAINER(window), vbox);
+    GtkWidget *save_pdf_button = gtk_button_new_with_label("Save as PDF");
+    g_signal_connect(save_pdf_button, "clicked", G_CALLBACK(on_save_pdf_button_clicked), &app);
+    gtk_box_pack_start(GTK_BOX(hbox), save_pdf_button, FALSE, FALSE, 0);
 
     gtk_widget_show_all(window);
     gtk_main();
 
-    for (int i = 0; i < app->num_pages; i++) {
-        free_object_list(app->pages[i]);
+    for (int i = 0; i < app.num_pages; i++) {
+        free_object_list(app.pages[i]);
     }
-    g_free(app->pages);
-    g_free(app);
+    g_free(app.pages);
 
     return 0;
 }
